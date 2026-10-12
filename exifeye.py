@@ -70,8 +70,8 @@ def _collect_images(paths: list[str], recursive: bool) -> list[Path]:
 def _prompt_for_target() -> str:
     """Ask interactively for an image/folder when no CLI targets are given.
 
-    Returns the entered path (stripped), or "" when the user exits
-    (empty line, Ctrl+C or EOF).
+    Returns the entered path (stripped, surrounding quotes removed), or ""
+    when the user exits (empty line, Ctrl+C or EOF).
     """
     renderer = ConsoleOutput()
     try:
@@ -81,7 +81,13 @@ def _prompt_for_target() -> str:
     except (EOFError, KeyboardInterrupt):
         renderer.console.print("")
         return ""
-    return raw.strip()
+    path = raw.strip()
+    # Windows users often paste paths WITH quotes (from Explorer / cmd). The
+    # interactive prompt never goes through a shell, so those quotes would be
+    # literal characters and the path would not resolve. Strip one pair.
+    if len(path) >= 2 and path[0] == path[-1] and path[0] in ('"', "'"):
+        path = path[1:-1]
+    return path
 
 
 def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
