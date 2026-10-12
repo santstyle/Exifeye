@@ -21,6 +21,7 @@ class JSONExport:
         hashes: Dict[str, Any],
         output_dir: str | Path | None = None,
         filename: str | None = None,
+        extra: Dict[str, Any] | None = None,
     ) -> Path:
         """Write the full report as JSON and return the output file path."""
         output_dir = Path(output_dir) if output_dir else result.file_path.parent
@@ -58,6 +59,16 @@ class JSONExport:
             "social_media_forensics": forensics,
             "hashes": hashes,
             "deep_forensics": deep,
+            # v2.0 / v2.1 analyzer outputs (each key only present when the
+            # corresponding analyzer actually ran for this file).
+            "thumbnail_recovery": (extra or {}).get("thumbnail"),
+            "jpeg_structure": (extra or {}).get("jpeg_structure"),
+            "meta_chunks": (extra or {}).get("chunks"),
+            "embedded_strings": (extra or {}).get("strings"),
+            "authentication_risk": (extra or {}).get("auth_risk"),
+            "gps_spoof_check": (extra or {}).get("gps_spoof"),
+            "trailing_data": (extra or {}).get("trailing"),
+            "panorama_detection": (extra or {}).get("panorama"),
             "errors": result.errors,
         }
 

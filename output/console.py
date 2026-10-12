@@ -141,7 +141,8 @@ class ConsoleOutput:
         thumbnail, jpeg_structure, chunks, strings - each an optional dict.
         """
         all_sections = {"gps", "device", "social", "forensics", "exif",
-                        "thumbnail", "jpeg_structure", "chunks", "strings"}
+                        "thumbnail", "jpeg_structure", "chunks", "strings",
+                        "auth_risk", "gps_spoof", "trailing", "panorama"}
         s = sections if sections is not None else all_sections
         extra = extra or {}
 
@@ -161,6 +162,12 @@ class ConsoleOutput:
             self._render_meta_chunks(extra["chunks"])
         if "strings" in s and extra.get("strings"):
             self._render_embedded_strings(extra["strings"])
+        if "gps_spoof" in s and extra.get("gps_spoof"):
+            self._render_gps_spoof(extra["gps_spoof"])
+        if "trailing" in s and extra.get("trailing"):
+            self._render_trailing(extra["trailing"])
+        if "panorama" in s and extra.get("panorama"):
+            self._render_panorama(extra["panorama"])
 
         if forensics and (("social" in s) if sections is not None
                           else forensics.get("detected_platform")):
@@ -171,6 +178,8 @@ class ConsoleOutput:
 
         if "exif" in s:
             self._render_exif_categories(result)
+        if "auth_risk" in s and extra.get("auth_risk"):
+            self._render_auth_risk(extra["auth_risk"])
         self._render_verdict(result, forensics, deep, extra)
 
         if not result.gps.get("available"):
@@ -633,6 +642,132 @@ class ConsoleOutput:
             grid,
             title=title,
             border_style=color,
+            padding=(1, 2),
+        ))
+
+    def _render_auth_risk(self, auth: Dict[str, Any]) -> None:
+        """Render the authentication risk meter (score, level, signal list)."""
+        if not auth.get("available"):
+            return
+
+        score = auth.get("score", 0)
+        level = auth.get("level", "LOW")
+        signals = auth.get("signals") or []
+        summary = auth.get("summary", "")
+
+        level_colors = {
+            "LOW": self.GOOD,
+            "MEDIUM": self.WARN,
+            "HIGH": self.BAD,
+            "CRITICAL": self.BAD,
+        }
+        color = level_colors.get(level, self.MUTED)
+
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=self.LABEL, justify="right")
+        grid.add_column(style=self.VALUE)
+
+        filled = int(round(score / 10))
+        bar = "█" * filled + "░" * (10 - filled)
+        grid.add_row("Risk Score", f"[bold {color}]{score}/100  {bar}[/bold {color}]")
+        grid.add_row("Level", f"[bold {color}]{level}[/bold {color}]")
+
+        if signals:
+            rows = []
+            for sig in signals:
+                rows.append(
+                    f"[dim]+{sig.get('weight', 0)}[/dim] "
+                    f"[bold]{escape(str(sig.get('name', '?')))}[/bold] - "
+                    f"{escape(str(sig.get('detail', '')))}"
+                )
+            grid.add_row("Signals", "\n".join(rows))
+
+        if summary:
+            grid.add_row("Summary", f"[{self.MUTED}]{escape(summary)}[/{self.MUTED}]")
+
+        title = (f"[bold {color}]AUTHENTICATION RISK: {level}[/bold {color}]"
+                 if signals else "[bold]AUTHENTICATION RISK: CLEAN[/bold]")
+        self.console.print(Panel(
+            grid,
+            title=title,
+            border_style=color,
+            padding=(1, 2),
+        ))
+
+    def _render_gps_spoof(self, spoof: Dict[str, Any]) -> None:
+        """Render the GPS spoof-check section (compact when clean)."""
+        issues = spoof.get("issues") or []
+        verdict = str(spoof.get("verdict", ""))
+        if "nothing to verify" in verdict:
+            return  # no GPS at all - skip, the NO GPS verdict already covers it
+
+        if not issues:
+            self.console.print(
+                f"[{self.GOOD}]GPS SPOOF CHECK: plausible[/{self.GOOD}] - {escape(verdict)}"
+            )
+            return
+
+        lines = [f"  [dim]-[/dim] {escape(str(issue))}" for issue in issues]
+        self.console.print(Panel(
+            "\n".join(lines) + f"\n\n[{self.BAD}]{escape(verdict)}[/{self.BAD}]",
+            title=f"[bold {self.BAD}]GPS SPOOF CHECK: {len(issues)} ISSUE(S)[/bold {self.BAD}]",
+            border_style=self.BAD,
+            padding=(1, 2),
+        ))
+
+    def _render_trailing(self, trailing: Dict[str, Any]) -> None:
+        """Render trailing-data / polyglot detection (only when bytes exist)."""
+        if not trailing.get("available"):
+            return  # unsupported container or read error
+        if trailing.get("trailing_bytes", 0) <= 0:
+            return  # clean file - no trailing data, skip
+
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=self.LABEL, justify="right")
+        grid.add_column(style=self.VALUE)
+
+        grid.add_row("Format", str(trailing.get("format", "?")))
+        end = trailing.get("logical_end")
+        if end is not None:
+            grid.add_row("Logical end", f"offset {end:,}")
+        grid.add_row("Trailing bytes",
+                     f"[bold {self.BAD}]{trailing.get('trailing_bytes'):,}[/bold {self.BAD}]")
+        sigs = trailing.get("signatures") or []
+        if sigs:
+            grid.add_row("Signatures",
+                         f"[bold {self.BAD}]{', '.join(escape(s) for s in sigs)}[/bold {self.BAD}]")
+        grid.add_row("Polyglot",
+                     f"[bold {self.BAD}]yes[/bold {self.BAD}]" if trailing.get("polyglot") else "no")
+        preview = trailing.get("trailing_preview")
+        if preview:
+            grid.add_row("Preview", f"[{self.MUTED}]{escape(str(preview))}[/{self.MUTED}]")
+
+        self.console.print(Panel(
+            grid,
+            title=f"[bold {self.BAD}]TRAILING DATA DETECTED[/bold {self.BAD}]",
+            border_style=self.BAD,
+            padding=(1, 2),
+        ))
+
+    def _render_panorama(self, pano: Dict[str, Any]) -> None:
+        """Render panorama / 360 detection (only when markers are found)."""
+        if not pano.get("available") or not pano.get("detected"):
+            return  # standard photo - skip panel
+
+        grid = Table.grid(padding=(0, 2))
+        grid.add_column(style=self.LABEL, justify="right")
+        grid.add_column(style=self.VALUE)
+
+        grid.add_row("Kind",
+                     f"[bold {self.GOOD}]'{escape(str(pano.get('kind')))}'"
+                     f"[/bold {self.GOOD}]")
+        for sig in (pano.get("signals") or [])[:8]:
+            grid.add_row("", f"[{self.MUTED}]- {escape(str(sig))}[/{self.MUTED}]")
+
+        self.console.print(Panel(
+            grid,
+            title=f"[bold {self.GOOD}]PANORAMA / 360 IMAGE[/bold {self.GOOD}]",
+            border_style=self.GOOD,
             padding=(1, 2),
         ))
 

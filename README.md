@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="output/banner.png" alt="ExifEye Neon Vision - Forensic Intelligence">
+  <img src="thumbnail.png" alt="ExifEye - Neon Forensic Intelligence">
 </p>
 
 # ExifEye
