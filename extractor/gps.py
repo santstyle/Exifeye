@@ -35,6 +35,13 @@ class GPSParser:
         if lat is None or lon is None:
             return result
 
+        if lat == 0.0 and lon == 0.0:
+            # An all-zero GPS IFD is a placeholder some phones write when
+            # location is disabled - (0.0000000, 0.0000000) is "Null Island",
+            # never a real capture position.
+            result["zero_placeholder"] = True
+            return result
+
         result["available"] = True
         result["latitude"] = lat
         result["longitude"] = lon

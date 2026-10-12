@@ -94,8 +94,13 @@ class ConsoleOutput:
             # GPS missing -> point the user to find the ORIGINAL copy that
             # still holds the coordinates. Skip when GPS was already found.
             stripped = self._gps_ifd_stripped(result)
+            zero_placeholder = result.gps.get("zero_placeholder")
             self.console.print(Rule(" LOCATE THE ORIGINAL "))
             tail = (
+                "this image's GPS IFD only holds zero coordinates - a placeholder "
+                "written when location was disabled or GPS never locked at capture. "
+                "Find the untouched ORIGINAL file (camera / SD card)"
+                if zero_placeholder else
                 "this image's GPS IFD is EMPTY - coordinates were likely removed "
                 "by software. Find the untouched ORIGINAL file (camera / SD card)"
                 if stripped else
@@ -361,9 +366,9 @@ class ConsoleOutput:
     def _gps_ifd_stripped(result: Any) -> bool:
         """Detect a stripped-GPS fingerprint: a GPS IFD exists but holds no
         coordinates (leftover `GPS GPSVersionID`, or a residual GPSInfo
-        pointer). Cameras with location simply disabled usually omit the GPS
-        IFD entirely - an empty-but-present IFD is the classic sign the
-        coordinates were removed by software.
+        pointer). Some cameras with location disabled simply omit the GPS
+        IFD entirely; others (e.g. Samsung) write an all-zero placeholder
+        IFD - that case is flagged separately as `zero_placeholder`.
         """
         for cat_tags in result.exif_data.values():
             for key in cat_tags:
@@ -385,11 +390,15 @@ class ConsoleOutput:
             lines.append(f"  [bold {self.GOOD}]GEOLOCATED[/bold {self.GOOD}]  {lat:.5f}, {lon:.5f}  "
                          f"-> [link={result.gps.get('google_maps_link', '')} underline]open in Google Maps[/link]")
         else:
-            gps_note = (
-                "GPS IFD found but empty - coordinates likely stripped"
-                if self._gps_ifd_stripped(result)
-                else "location not embedded (check camera/location permissions when taken)"
-            )
+            if result.gps.get("zero_placeholder"):
+                gps_note = ("GPS IFD present but coordinates are (0,0) - "
+                            "placeholder (location disabled or GPS not locked when taken)")
+            else:
+                gps_note = (
+                    "GPS IFD found but empty - coordinates likely stripped"
+                    if self._gps_ifd_stripped(result)
+                    else "location not embedded (check camera/location permissions when taken)"
+                )
             lines.append(f"  [bold {self.BAD}]NO GPS[/bold {self.BAD}]  {gps_note}")
 
         if device_ok:
