@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / install artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Reports / exports (generated)
+reports/
+*_metadata_report.json
+*_report.html
+
+# Test scratch
+test_data/
+smoke/
+*.log
+
+# Personal test images (do not push)
+20261011_135335.jpg
+
+# Virtualenvs / tooling caches
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Orchestration artifacts
+.omo/
