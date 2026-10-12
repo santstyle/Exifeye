@@ -93,13 +93,21 @@ class ConsoleOutput:
         if not result.gps.get("available"):
             # GPS missing -> point the user to find the ORIGINAL copy that
             # still holds the coordinates. Skip when GPS was already found.
+            stripped = self._gps_ifd_stripped(result)
             self.console.print(Rule(" LOCATE THE ORIGINAL "))
+            tail = (
+                "this image's GPS IFD is EMPTY - coordinates were likely removed "
+                "by software. Find the untouched ORIGINAL file (camera / SD card)"
+                if stripped else
+                "find a copy of this image that kept its GPS (or check if "
+                "original had location enabled)"
+            )
             self.console.print(
                 "[dim]Reverse image search: [link=https://lens.google.com/]Google Lens[/link] | "
                 "[link=https://yandex.com/images/]Yandex[/link] | "
                 "[link=https://tineye.com/]TinEye[/link] | "
                 "[link=https://www.bing.com/visualsearch]Bing Visual[/link] - "
-                "find a copy of this image that kept its GPS (or check if original had location enabled)[/dim]"
+                f"{tail}[/dim]"
             )
 
     def _render_file_info(self, result: Any) -> None:
@@ -349,6 +357,20 @@ class ConsoleOutput:
             self.console.print(table)
             self.console.print()
 
+    @staticmethod
+    def _gps_ifd_stripped(result: Any) -> bool:
+        """Detect a stripped-GPS fingerprint: a GPS IFD exists but holds no
+        coordinates (leftover `GPS GPSVersionID`, or a residual GPSInfo
+        pointer). Cameras with location simply disabled usually omit the GPS
+        IFD entirely - an empty-but-present IFD is the classic sign the
+        coordinates were removed by software.
+        """
+        for cat_tags in result.exif_data.values():
+            for key in cat_tags:
+                if key.startswith("GPS "):
+                    return True
+        return "Image GPSInfo" in result.exif_data.get("Image", {})
+
     def _render_verdict(self, result: Any, forensics: Dict[str, Any] | None,
                         deep: Dict[str, Any] | None) -> None:
         """Render the final verdict panel - the memorable takeaway."""
@@ -363,7 +385,12 @@ class ConsoleOutput:
             lines.append(f"  [bold {self.GOOD}]GEOLOCATED[/bold {self.GOOD}]  {lat:.5f}, {lon:.5f}  "
                          f"-> [link={result.gps.get('google_maps_link', '')} underline]open in Google Maps[/link]")
         else:
-            lines.append(f"  [bold {self.BAD}]NO GPS[/bold {self.BAD}]  location not embedded (check camera/location permissions when taken)")
+            gps_note = (
+                "GPS IFD found but empty - coordinates likely stripped"
+                if self._gps_ifd_stripped(result)
+                else "location not embedded (check camera/location permissions when taken)"
+            )
+            lines.append(f"  [bold {self.BAD}]NO GPS[/bold {self.BAD}]  {gps_note}")
 
         if device_ok:
             parts = [result.device.get("brand"), result.device.get("model_name"), result.device.get("model")]
