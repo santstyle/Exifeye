@@ -5,6 +5,7 @@ Usage:
     python exifeye.py image.jpg
     python exifeye.py folder/ --recursive
     python exifeye.py image.jpg --json --html
+    python exifeye.py image.jpg --lens     # reverse-image search (Lens/Yandex/...)
     python exifeye.py -h             # show all options
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ if sys.platform == "win32":
 
 from extractor.core import MetadataExtractor
 from extractor.hashes import HashCalculator
+from extractor.lens import open_reverse_search, upload_image
 from analyzers.social_media import SocialMediaForensics
 from analyzers.deep_forensics import DeepForensics
 from output.console import ConsoleOutput
@@ -94,12 +96,16 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                   export_html: bool, output_dir: str | None, no_hashes: bool,
                   no_deep: bool, no_social: bool, quiet: bool,
                   sections: set[str] | None = None,
-                  show_banner: bool = True) -> int:
+                  show_banner: bool = True, lens: bool = False) -> int:
     """Analyze the given paths and print reports. Returns process exit code."""
     images = _collect_images(paths, recursive)
 
     if not images:
         console.print("[red]No supported image files found.[/red]")
+        return 1
+
+    if lens and len(images) != 1:
+        console.print("[red]--lens works with exactly one image.[/red]")
         return 1
 
     console_renderer = ConsoleOutput()
@@ -199,11 +205,38 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
             finally:
                 progress.update(task, advance=1)
 
+    if lens:
+        _run_reverse_search(images[0])
+
     console.print(
         f"\n[bold {GREEN}]Done: {len(images) - failed}/{len(images)} analyzed"
         f"{', ' + str(failed) + ' failed' if failed else ''}[/bold {GREEN}]"
     )
     return 1 if failed else 0
+
+
+def _run_reverse_search(image_path: Path) -> None:
+    """Upload a single image and open Google Lens / Yandex / Bing / TinEye.
+
+    The classic OSINT bypass for a picture with missing GPS: an online copy
+    of the same image often kept its coordinates.
+    """
+    console.print(f"\n[{LIME}]Reverse image search: uploading {image_path.name} ...[/{LIME}]")
+    try:
+        hosted = upload_image(image_path)
+    except Exception as e:
+        console.print(f"[red]Reverse image search failed: {e}[/red]")
+        return
+    console.print(f"[{MINT}]Uploaded to public host:[/{MINT}] {hosted}")
+    opened = open_reverse_search(hosted)
+    if opened:
+        console.print(f"[{MINT}]Opened in browser:[/{MINT}] {', '.join(opened)}")
+    else:
+        console.print("[red]Could not open the browser.[/red]")
+    console.print(
+        f"[{LIME}]Tip: run search hits through ExifEye - a copy that still has "
+        f"GPS is the fastest way to a location.[/{LIME}]"
+    )
 
 
 @click.command(name="exifeye", context_settings={"help_option_names": ["-h", "--help"]})
@@ -218,8 +251,11 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
 @click.option("--quiet", "-q", is_flag=True, help="Only print the summary, not full report")
 @click.option("--device-db", type=click.Path(exists=True), default=None,
               help="Path to custom device enrichment JSON database")
+@click.option("--lens", is_flag=True,
+              help="Reverse-image search the image via Google Lens / Yandex / Bing / TinEye "
+                   "(uploads it to a public host first)")
 def main(paths, recursive, export_json, export_html, output_dir, no_hashes,
-         no_deep, no_social, quiet, device_db):
+         no_deep, no_social, quiet, device_db, lens):
     """ExifEye - read EXIF, GPS, device info and more from images.
 
     Run without arguments to enter the interactive prompt and choose an
@@ -238,6 +274,7 @@ def main(paths, recursive, export_json, export_html, output_dir, no_hashes,
     sys.exit(_run_analysis(
         list(paths), recursive, export_json, export_html, output_dir,
         no_hashes, no_deep, no_social, quiet, show_banner=show_banner,
+        lens=lens,
     ))
 
 

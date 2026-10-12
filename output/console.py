@@ -114,6 +114,10 @@ class ConsoleOutput:
                 "[link=https://www.bing.com/visualsearch]Bing Visual[/link] - "
                 f"{tail}[/dim]"
             )
+            self.console.print(
+                "[dim]Tip: run [bold]exifeye --lens <image>[/bold] to push this photo "
+                "through Google Lens / Yandex / Bing / TinEye automatically[/dim]"
+            )
 
     def _render_file_info(self, result: Any) -> None:
         """Render basic file information as a header card."""
