@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="thumbnail.png" alt="ExifEye - Neon Forensic Intelligence">
+</p>
+
 # ExifEye
 
 **IMAGE INTELLIGENCE | EXIF + GPS + DEVICE + FORENSICS**
