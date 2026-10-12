@@ -2,6 +2,11 @@
 Core metadata extraction engine.
 Parses EXIF, XMP, IPTC, ICC profile, and embedded thumbnails from image files
 using exifread primary and Pillow as fallback.
+
+v2.2: content-sniffs every input (extractor.sniff) and dispatches
+non-image containers to their dedicated parsers - ISO-BMFF video,
+PDF, OOXML/ODF, legacy OLE - so documents and videos are first-class
+citizens instead of crashes.
 """
 from __future__ import annotations
 
@@ -12,8 +17,17 @@ from typing import Any, Dict, Optional
 import exifread
 from PIL import Image
 
+try:
+    # Enables Pillow to open HEIC/HEIF/AVIF (iPhone pictures) - optional dep.
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+except Exception:  # noqa: BLE001 - HEIC support simply unavailable
+    pass
+
 from .gps import GPSParser
 from .device import DeviceIdentifier
+from .sniff import SniffResult, sniff_path
 
 
 @dataclass
@@ -41,6 +55,8 @@ class ExtractionResult:
     xmp_data: Dict[str, Any] = field(default_factory=dict)
     iptc_data: Dict[str, Any] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    kind: str = "image"  # sniffed content kind: image/video/document/archive/audio/unknown
+    flags: Dict[str, Any] = field(default_factory=dict)  # macros, JS, embedded files, ...
 
 
 # Categorization of EXIF tags into human-readable groups
@@ -95,27 +111,58 @@ class MetadataExtractor:
         self.device_identifier = DeviceIdentifier()
 
     def extract(self) -> ExtractionResult:
-        """Run full metadata extraction pipeline."""
+        """Run full metadata extraction pipeline (content-sniffed dispatch)."""
+        sniff = sniff_path(self.file_path)
+        # Images (and unrecognized/corrupt bytes) keep the legacy suffix-based
+        # metadata; every other container goes to its dedicated parser.
+        is_image_path = sniff.kind in ("image", "unknown")
         result = ExtractionResult(
             file_path=str(self.file_path),
             file_name=self.file_path.name,
             file_size=self.file_path.stat().st_size,
-            file_type=self.file_path.suffix.lower().lstrip('.'),
-            mime_type=self._guess_mime_type(),
+            file_type=(self.file_path.suffix.lower().lstrip('.') if is_image_path
+                       else sniff.format),
+            mime_type=(self._guess_mime_type() if is_image_path else sniff.mime),
             dimensions=(0, 0),
             mode="",
+            kind=sniff.kind,
         )
+
+        if sniff.kind == "video":
+            return self._extract_video(result)
+        if sniff.kind in ("document", "archive"):
+            return self._extract_document(result, sniff)
+        if sniff.kind == "audio":
+            result.exif_data["Audio"] = {
+                "Format": sniff.format,
+                "MIME": sniff.mime,
+            }
+            result.errors.append(
+                "Audio container: no dedicated metadata parser "
+                "(strings/hashes still run)."
+            )
+            return result
 
         try:
             with open(self.file_path, 'rb') as f:
                 tags = exifread.process_file(
                     f, details=True, strict=False, debug=False
                 )
-            if not tags:
-                result.errors.append("No EXIF tags found in file.")
         except Exception as e:
             result.errors.append(f"exifread error: {e}")
             tags = {}
+
+        if not tags:
+            # exifread is JPEG/TIFF-centric: HEIC/AVIF (and other formats it
+            # cannot walk) come back empty even though Pillow decodes their
+            # EXIF fine - recover the tags before giving up.
+            tags = self._pillow_exif_tags()
+            if tags:
+                result.errors.append(
+                    "exifread found no tags - EXIF recovered via Pillow."
+                )
+            else:
+                result.errors.append("No EXIF tags found in file.")
 
         # Parse EXIF data with categorization
         for tag_key, tag_value in tags.items():
@@ -166,9 +213,12 @@ class MetadataExtractor:
                 8: "Rotate 270 CW",
             }
             try:
-                val = int(tags["Image Orientation"].values[0])
+                # exifread tags expose .values; Pillow fallback gives plain ints.
+                raw_orientation = tags["Image Orientation"]
+                values = getattr(raw_orientation, "values", None)
+                val = int(values[0] if values else raw_orientation)
                 result.orientation = orientation_map.get(val, f"Unknown ({val})")
-            except (IndexError, TypeError, ValueError):
+            except (IndexError, TypeError, ValueError, AttributeError):
                 result.orientation = str(tags["Image Orientation"])
 
         if "Image Software" in tags:
@@ -179,6 +229,122 @@ class MetadataExtractor:
             result.copyright = str(tags["Image Copyright"])
 
         return result
+
+    # ------------------------------------------------------------------
+    # v2.2 dispatch: non-image containers route here from extract()
+    # ------------------------------------------------------------------
+
+    def _extract_video(self, result: ExtractionResult) -> ExtractionResult:
+        """Fill result from the ISO-BMFF parser (MP4/MOV/M4V/3GP/M4A)."""
+        from .video_mp4 import parse as video_parse
+
+        payload = video_parse(self.file_path, self.gps_parser)
+        result.exif_data = payload.get("exif_data") or {"Video": {}}
+        result.gps = payload.get("gps") or {"available": False}
+        result.timestamps = payload.get("timestamps") or {}
+        dims = payload.get("dimensions") or (0, 0)
+        if dims and dims != (0, 0):
+            result.dimensions = dims
+        result.errors.extend(payload.get("errors") or [])
+        result.flags.update(payload.get("flags") or {})
+
+        # Enrich make/model through the shared device identifier so brand /
+        # device-type / OS classification matches the image pipeline.
+        dev = payload.get("device") or {}
+        if dev.get("make") or dev.get("model"):
+            fake_tags = {
+                "Image Make": str(dev.get("make") or ""),
+                "Image Model": str(dev.get("model") or ""),
+                "Image Software": str(dev.get("software") or ""),
+            }
+            result.device = self.device_identifier.identify(fake_tags, result)
+        if not result.device.get("device_type"):
+            result.device["device_type"] = "Video"
+        return result
+
+    def _extract_document(self, result: ExtractionResult,
+                          sniff: SniffResult) -> ExtractionResult:
+        """Fill result from PDF / OOXML+ODF / legacy OLE parsers."""
+        fmt = sniff.format
+        detail = sniff.detail
+        if fmt == "pdf":
+            from .doc_pdf import parse as parser
+        elif detail == "ole" or fmt in ("ole", "doc", "xls", "ppt", "pps",
+                                        "msg", "vsd", "one", "msi", "pub",
+                                        "mdb", "accdb"):
+            from .doc_ole import parse as parser
+        else:
+            # OOXML, ODF, encrypted-OOXML-in-zip, plain ZIP inventory
+            from .doc_ooxml import parse as parser
+
+        payload = parser(self.file_path)
+        result.exif_data = payload.get("exif_data") or {"Document": {}}
+        result.timestamps = payload.get("timestamps") or {}
+        result.errors.extend(payload.get("errors") or [])
+        result.flags.update(payload.get("flags") or {})
+        gps = payload.get("gps")
+        if gps and gps.get("available"):
+            result.gps = gps
+        dims = payload.get("dimensions") or (0, 0)
+        if dims and dims != (0, 0):
+            result.dimensions = dims
+        if payload.get("device"):
+            result.device = payload["device"]
+        return result
+
+    def _pillow_exif_tags(self) -> Dict[str, Any]:
+        """exifread-style tag dict built from Pillow (HEIC/HEIF/AVIF path).
+
+        pillow-heif registers HEIC openers with Pillow, but exifread only
+        understands JPEG/TIFF, so iPhone HEIC files come back tagless from it.
+        This normalizes Pillow's numeric IFD0 / Exif / GPS dictionaries into
+        the exact key names the rest of the pipeline (categorization, GPS
+        parser, device identifier, timestamps) already consumes.
+        """
+        try:
+            from PIL.ExifTags import GPSTAGS, TAGS as EXIF_TAGS
+
+            with Image.open(self.file_path) as img:
+                exif = img.getexif()
+        except Exception:  # noqa: BLE001 - unopenable/HEIC-less file
+            return {}
+        if not exif:
+            return {}
+
+        # Structural pointer IFDs - noise, not metadata.
+        _SKIP_IDS = {34665, 34853, 40965, 37500}  # Exif/GPS/Interop/MakerNote
+        tags: Dict[str, Any] = {}
+
+        def _norm(value: Any) -> Any:
+            if isinstance(value, (bytes, bytearray)):
+                return bytes(value).decode("utf-8", errors="replace")[:500]
+            if isinstance(value, tuple):
+                return list(value)
+            return value
+
+        for tag_id, value in exif.items():
+            if tag_id in _SKIP_IDS:
+                continue
+            name = EXIF_TAGS.get(tag_id)
+            if name:
+                tags[f"Image {name}"] = _norm(value)
+        try:
+            for tag_id, value in exif.get_ifd(0x8769).items():  # Exif IFD
+                if tag_id in _SKIP_IDS:
+                    continue
+                name = EXIF_TAGS.get(tag_id)
+                if name:
+                    tags[f"EXIF {name}"] = _norm(value)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            for tag_id, value in exif.get_ifd(0x8825).items():  # GPS IFD
+                name = GPSTAGS.get(tag_id)
+                if name:
+                    tags[f"GPS {name}"] = _norm(value)
+        except Exception:  # noqa: BLE001
+            pass
+        return tags
 
     def _extract_gps_pillow(self, result: ExtractionResult) -> None:
         """Recover GPS coordinates via Pillow when exifread misses them.

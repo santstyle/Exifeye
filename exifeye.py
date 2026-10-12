@@ -1,8 +1,9 @@
 """
-ExifEye - OSINT image metadata extractor (EXIF + GPS + device + forensics).
+ExifEye - OSINT metadata extractor (images + documents + video).
 
 Usage:
     python exifeye.py image.jpg
+    python exifeye.py report.pdf invoice.docx clip.mp4
     python exifeye.py folder/ --recursive
     python exifeye.py image.jpg --json --html
     python exifeye.py image.jpg --lens     # private Google Lens search (local, no upload)
@@ -10,11 +11,14 @@ Usage:
 """
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 # Force UTF-8 output on Windows consoles so box characters / degree symbols
@@ -29,6 +33,7 @@ if sys.platform == "win32":
 from extractor.core import MetadataExtractor
 from extractor.hashes import HashCalculator
 from extractor.lens import open_for_lens
+from extractor.sniff import sniff_path
 from analyzers.social_media import SocialMediaForensics
 from analyzers.deep_forensics import DeepForensics
 from analyzers.thumbnail_meta import ThumbnailMiner
@@ -39,6 +44,9 @@ from analyzers.dupes import DupHunter
 from analyzers.batch_intel import BatchIntelligence
 from analyzers.auth_risk import AuthenticationRiskMeter
 from analyzers.gps_spoof import GpsSpoofCheck
+from analyzers.timestamps import TimestampAnalyzer
+from analyzers.screenshot import FilenameOriginDetector
+from analyzers.ai_generated import AiGeneratedDetector
 from analyzers.trailing import TrailingDataDetector
 from analyzers.panorama import PanoramaDetector
 from output.console import ConsoleOutput
@@ -57,13 +65,24 @@ LIME = "#c8f542"     # warnings / notices
 MINT = "#9effb0"     # success / exported
 
 SUPPORTED_EXTENSIONS = {
+    # images (raster, raw, vector)
     ".jpg", ".jpeg", ".jfif", ".png", ".gif", ".webp", ".bmp", ".tiff",
-    ".tif", ".heic", ".heif", ".cr2", ".nef", ".arw", ".raw",
+    ".tif", ".heic", ".heif", ".avif", ".svg",
+    ".cr2", ".nef", ".arw", ".raw",
+    # video
+    ".mp4", ".mov", ".m4v", ".3gp", ".3g2", ".avi",
+    # audio containers
+    ".m4a", ".m4b", ".mp3", ".flac",
+    # documents
+    ".pdf", ".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt", ".pps",
+    ".odt", ".ods", ".odp", ".msg", ".msi",
+    # archives
+    ".zip",
 }
 
 
 def _collect_images(paths: list[str], recursive: bool) -> list[Path]:
-    """Collect image files from provided paths (files or directories)."""
+    """Collect supported files (images, video, documents, archives)."""
     images: list[Path] = []
     for raw in paths:
         p = Path(raw)
@@ -104,6 +123,100 @@ def _prompt_for_target() -> str:
     return path
 
 
+def _check_web_url(url: str) -> None:
+    """GET a URL and print its HTTP response headers (diagnostic).
+
+    The tool only issues a GET for the user-supplied URL - no image data
+    ever leaves this machine. Only http/https are accepted so a crafted
+    "URL" cannot be turned into a local file read (file://, etc.).
+    """
+    import urllib.error
+    import urllib.request
+
+    target = url.strip()
+    if not target.lower().startswith(("http://", "https://")):
+        console.print(
+            f"[{LIME}]--web only accepts http:// or https:// URLs[/{LIME}]"
+        )
+        return
+    req = urllib.request.Request(
+        target, headers={"User-Agent": "ExifEye/2.2 (metadata check)"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            console.print(
+                f"[{GREEN}]WEB {resp.status} - {escape(resp.geturl())}[/{GREEN}]"
+            )
+            for key in ("content-type", "content-length", "last-modified",
+                        "etag", "server", "date", "location"):
+                val = resp.headers.get(key)
+                if val:
+                    console.print(
+                        f"  [{MINT}]{key}:[/{MINT}] {escape(str(val))}"
+                    )
+            extra = [f"{k}: {v}" for k, v in resp.headers.items()
+                     if k.lower().startswith("x-")]
+            if extra:
+                console.print(
+                    f"  [{MINT}]x-headers:[/{MINT}] {escape('; '.join(extra))}"
+                )
+    except urllib.error.HTTPError as e:
+        console.print(f"[{LIME}]HTTP {e.code} - {escape(target)}[/{LIME}]")
+        if e.headers and e.headers.get("content-type"):
+            console.print(
+                f"  [{MINT}]content-type:[/{MINT}] "
+                f"{escape(str(e.headers.get('content-type')))}"
+            )
+    except Exception as e:
+        console.print(f"[{LIME}]Web check failed: {escape(str(e))}[/{LIME}]")
+    console.print(
+        f"  [dim]GET only - nothing was uploaded to "
+        f"{escape(target.split('/')[2])}[/dim]"
+    )
+
+
+def _run_ocr(image_path: Path) -> None:
+    """Extract printed text with tesseract; never raises, honest failures."""
+    from rich.panel import Panel
+
+    exe = shutil.which("tesseract") or "tesseract"
+    try:
+        proc = subprocess.run(
+            [exe, str(image_path), "stdout"],
+            capture_output=True, encoding="utf-8",
+            errors="replace", timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        console.print(
+            f"[{LIME}]OCR timed out for {escape(image_path.name)}[/{LIME}]"
+        )
+        return
+    except OSError as e:
+        console.print(
+            f"[{LIME}]OCR failed for {escape(image_path.name)}: "
+            f"{escape(str(e))}[/{LIME}]"
+        )
+        return
+    text = (proc.stdout or "").strip()
+    if not text:
+        detail = (proc.stderr or "").strip().splitlines()
+        hint = detail[-1] if detail else f"exit code {proc.returncode}"
+        console.print(
+            f"[{LIME}]OCR: no text detected in {escape(image_path.name)} "
+            f"({escape(hint)})[/{LIME}]"
+        )
+        return
+    lines = text.splitlines()
+    shown = "\n".join(lines[:60])
+    if len(lines) > 60:
+        shown += f"\n... ({len(lines) - 60} more lines)"
+    console.print(Panel(
+        escape(shown),
+        title=f"[bold {GREEN}]OCR TEXT[/bold {GREEN}]",
+        border_style=GREEN,
+    ))
+
+
 def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                   export_html: bool, output_dir: str | None, no_hashes: bool,
                   no_deep: bool, no_social: bool, quiet: bool,
@@ -115,16 +228,41 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                   extract_thumb_dir: str | None = None,
                   scrub: bool = False,
                   html_index: bool = False,
-                  dump_raw: bool = False) -> int:
+                  dump_raw: bool = False,
+                  export_map: bool = False,
+                  ocr: bool = False) -> int:
     """Analyze the given paths and print reports. Returns process exit code."""
     images = _collect_images(paths, recursive)
 
     if not images:
-        console.print("[red]No supported image files found.[/red]")
+        console.print("[red]No supported files found.[/red]")
         return 1
 
     if lens and len(images) != 1:
         console.print("[red]--lens works with exactly one image.[/red]")
+        return 1
+
+    # OCR is opt-in and needs the external tesseract binary; when it is
+    # missing, continue the analysis and say so once (never crash).
+    ocr_enabled = bool(ocr)
+    if ocr and not shutil.which("tesseract"):
+        console.print(
+            f"[{LIME}]OCR unavailable: tesseract not found on PATH[/{LIME}]"
+        )
+        console.print(
+            "  Install it: [bold]winget install UB-Mannheim.TesseractOCR[/bold] "
+            "(Windows) or [bold]sudo apt install tesseract-ocr[/bold] (Linux), "
+            "then reopen the terminal. Continuing without OCR."
+        )
+        ocr_enabled = False
+    elif ocr and quiet:
+        console.print(
+            f"[{LIME}]--quiet suppresses OCR text output[/{LIME}]"
+        )
+        ocr_enabled = False
+
+    if lens and sniff_path(images[0]).kind not in ("image", "unknown"):
+        console.print("[red]--lens works with image files only.[/red]")
         return 1
 
     if diff and len(images) != 2:
@@ -146,7 +284,7 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
     if show_banner:
         console_renderer.render_banner()
 
-    console.print(f"[bold {GREEN}]Found {len(images)} image(s) to analyze[/bold {GREEN}]\n")
+    console.print(f"[bold {GREEN}]Found {len(images)} file(s) to analyze[/bold {GREEN}]\n")
 
     hash_calc = HashCalculator()
     social_fx = SocialMediaForensics()
@@ -157,6 +295,9 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
     string_miner = StringMiner() if show_strings else None
     auth_meter = AuthenticationRiskMeter()
     gps_spoof_check = GpsSpoofCheck()
+    timestamp_checker = TimestampAnalyzer()
+    filename_origin = FilenameOriginDetector()
+    ai_detector = AiGeneratedDetector()
     trailing_detector = TrailingDataDetector()
     panorama_detector = PanoramaDetector()
     raw_dumper = RawTagDumper()
@@ -184,11 +325,17 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 extractor = MetadataExtractor(image_path)
                 result = extractor.extract()
 
+                # Pixel/structure analyzers only make sense for images; video,
+                # documents and archives skip them (hashes/strings/GPS don't).
+                is_image = result.kind in ("image", "unknown")
+
                 # 2. Forensics
-                forensics = {} if no_social else social_fx.analyze(image_path, result)
+                forensics = {}
+                if is_image and not no_social:
+                    forensics = social_fx.analyze(image_path, result)
 
                 deep = {}
-                if not no_deep:
+                if is_image and not no_deep:
                     deep = {
                         "ela": deep_fx.run_ela(image_path),
                         "steganography": deep_fx.check_steganography(image_path),
@@ -201,35 +348,59 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 # 4. v2.0 analyzers: thumbnail recovery, JPEG structure and
                 #    chunk mining run always-on; embedded strings only when
                 #    requested (it reads raw bytes and is the slowest one).
-                extra = {
-                    "thumbnail": thumbnail_miner.analyze(image_path),
-                    "jpeg_structure": jpeg_struct.analyze(image_path),
-                    "chunks": chunk_miner.analyze(image_path),
-                }
+                extra: dict = {}
+                if is_image:
+                    extra["thumbnail"] = thumbnail_miner.analyze(image_path)
+                    extra["jpeg_structure"] = jpeg_struct.analyze(image_path)
+                    extra["chunks"] = chunk_miner.analyze(image_path)
                 if string_miner is not None:
+                    # raw-byte scan works for any container (PDF/MP4 too)
                     extra["strings"] = string_miner.analyze(image_path)
 
-                # 4b. Authentication risk meter: combine all signals above
-                #     into a single authenticity score.
-                extra["auth_risk"] = auth_meter.analyze(
-                    result, forensics, deep, extra
-                )
+                # 4b. Authentication risk meter: image authenticity only -
+                #     combine all signals above into a single score.
+                if is_image:
+                    extra["auth_risk"] = auth_meter.analyze(
+                        result, forensics, deep, extra
+                    )
 
-                # 4c. GPS spoof-check + trailing-data / polyglot detection.
+                # 4c. GPS spoof-check (any kind with GPS/timestamps) +
+                #     trailing-data / polyglot detection (image containers).
                 extra["gps_spoof"] = gps_spoof_check.analyze(
                     result.gps, result.timestamps
                 )
-                extra["trailing"] = trailing_detector.analyze(image_path)
+                # 4c1. Timestamp consistency (all kinds: image/document/
+                #      video) - placeholders, skew, ordering, tz inference.
+                extra["timestamp_check"] = timestamp_checker.analyze(
+                    result.timestamps, result.gps
+                )
+                # 4c2. Filename origin (screenshot / device-default naming)
+                #      - pure name check, runs for every file kind.
+                extra["filename_origin"] = filename_origin.analyze(image_path)
+                # 4c3. AI-generation / C2PA provenance - the marker lives
+                #      in the bytes, so this runs for every file kind.
+                extra["ai_generated"] = ai_detector.analyze(
+                    image_path, result.exif_data, result.xmp_data
+                )
+                if is_image:
+                    extra["trailing"] = trailing_detector.analyze(image_path)
 
                 # 4c2. Panorama / 360 detection (XMP GPano + device hints).
-                extra["panorama"] = panorama_detector.analyze(
-                    image_path, result.xmp_data, result.device
-                )
+                if is_image:
+                    extra["panorama"] = panorama_detector.analyze(
+                        image_path, result.xmp_data, result.device
+                    )
 
                 # 4d. Dump the embedded EXIF thumbnail to a standalone file
                 #     when requested (reuses the offset/length the miner
                 #     already located - no second JPEG walk needed).
-                if extract_thumb:
+                if extract_thumb and not is_image:
+                    if not quiet:
+                        console.print(
+                            f"[{LIME}]--extract-thumb is image-only - "
+                            f"skipped for {image_path.name}[/{LIME}]"
+                        )
+                elif extract_thumb:
                     thumb = extra["thumbnail"]
                     if thumb.get("available") and thumb.get("offset") is not None \
                             and thumb.get("length"):
@@ -247,7 +418,13 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                         )
 
                 # 4e. Scrub: write a metadata-free copy when requested.
-                if scrub:
+                if scrub and not is_image:
+                    if not quiet:
+                        console.print(
+                            f"[{LIME}]--scrub is image-only for now - "
+                            f"skipped for {image_path.name}[/{LIME}]"
+                        )
+                elif scrub:
                     scrubbed = _scrub_image(image_path)
                     if scrubbed and not quiet:
                         console.print(
@@ -257,7 +434,12 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 # 4f. Raw tag dump: full exifread inventory to a text file.
                 if dump_raw:
                     try:
-                        dump_path = raw_dumper.dump(image_path)
+                        if is_image:
+                            dump_path = raw_dumper.dump(image_path)
+                        else:
+                            dump_path = raw_dumper.dump_result(
+                                result, image_path
+                            )
                         if not quiet:
                             console.print(
                                 f"[{MINT}]Raw tag dump:[/{MINT}] {dump_path}"
@@ -265,7 +447,7 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                     except RuntimeError as e:
                         console.print(
                             f"[{LIME}]Raw dump failed for "
-                            f"{image_path.name}: {e}[/{LIME}]"
+                            f"{escape(image_path.name)}: {escape(str(e))}[/{LIME}]"
                         )
 
                 # 5. Output
@@ -275,6 +457,16 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                     console_renderer.render(
                         result, forensics, deep, sections=sections, extra=extra
                     )
+
+                # 5b. OCR (opt-in, image-only): tesseract text extraction.
+                if ocr_enabled and not quiet:
+                    if is_image:
+                        _run_ocr(image_path)
+                    else:
+                        console.print(
+                            f"[{LIME}]--ocr is image-only - skipped for "
+                            f"{escape(image_path.name)}[/{LIME}]"
+                        )
 
                 # 6. Exports
                 if export_json or export_html:
@@ -345,7 +537,7 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 console.print(f"[red]Permission denied: {image_path}[/red]")
                 failed += 1
             except Exception as e:
-                console.print(f"[red]Error analyzing {image_path.name}: {e}[/red]")
+                console.print(f"[red]Error analyzing {escape(image_path.name)}: {escape(str(e))}[/red]")
                 failed += 1
             finally:
                 progress.update(task, advance=1)
@@ -364,6 +556,17 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 f"[{LIME}]No geolocated images found - geo export skipped[/{LIME}]"
             )
 
+    if export_map and results:
+        map_path = GeoExporter().export_map(results, output_dir)
+        if map_path:
+            console.print(
+                f"[{MINT}]GPS map (HTML):[/{MINT}] {map_path}"
+            )
+        else:
+            console.print(
+                f"[{LIME}]No geolocated images found - map skipped[/{LIME}]"
+            )
+
     if html_index:
         if len(index_entries) >= 2:
             idx_path = html_exporter.write_index(index_entries, output_dir)
@@ -378,9 +581,15 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
         batch = BatchIntelligence().analyze(results)
         console_renderer.render_batch(batch)
 
-    if not quiet and find_dupes and len(results) >= 2:
-        dupes = DupHunter().analyze([r.file_path for r in results])
-        console_renderer.render_dupes(dupes)
+    if not quiet and find_dupes:
+        image_results = [r for r in results if r.kind in ("image", "unknown")]
+        if len(image_results) >= 2:
+            dupes = DupHunter().analyze([r.file_path for r in image_results])
+            console_renderer.render_dupes(dupes)
+        else:
+            console.print(
+                f"[{LIME}]--find-dupes needs 2+ image files - skipped[/{LIME}]"
+            )
 
     if diff and len(results) == 2 and not quiet:
         _render_diff(results[0], results[1])
@@ -557,7 +766,7 @@ def _scrub_image(image_path: Path) -> Path | None:
     try:
         data = image_path.read_bytes()
     except OSError as e:
-        console.print(f"[red]Scrub failed for {image_path.name}: {e}[/red]")
+        console.print(f"[red]Scrub failed for {escape(image_path.name)}: {escape(str(e))}[/red]")
         return None
 
     scrubbed: bytes | None = None
@@ -587,7 +796,7 @@ def _scrub_image(image_path: Path) -> Path | None:
             scrubbed = buf.getvalue()
             img.close()
         except Exception as e:
-            console.print(f"[red]Scrub failed for {image_path.name}: {e}[/red]")
+            console.print(f"[red]Scrub failed for {escape(image_path.name)}: {escape(str(e))}[/red]")
             return None
 
     if not scrubbed:
@@ -649,9 +858,9 @@ def _run_lens_search(image_path: Path) -> None:
                    "original copy (needs 2+ images)")
 @click.option("--diff", is_flag=True,
               help="Compare two images field-by-field (EXIF, GPS, device)")
-@click.option("--export-geo", type=click.Choice(["kml", "gpx", "csv"]), default=None,
-              help="Export geolocated image coordinates to KML/GPX/CSV "
-                   "(one file with all GPS points)")
+@click.option("--export-geo", type=click.Choice(["kml", "gpx", "geojson", "csv"]), default=None,
+              help="Export geolocated image coordinates to KML/GPX/GeoJSON/CSV "
+                   "(one file with all GPS points + a path track when 2+)")
 @click.option("--extract-thumb", is_flag=True,
               help="Save the embedded EXIF thumbnail to a standalone .jpg file")
 @click.option("--extract-thumb-dir", type=click.Path(), default=None,
@@ -667,16 +876,30 @@ def _run_lens_search(image_path: Path) -> None:
 @click.option("--dump-raw", is_flag=True,
               help="Dump every raw EXIF tag to <name>_raw_tags.txt next to "
                    "the image (full exifread inventory)")
+@click.option("--ocr", is_flag=True,
+              help="Extract printed text from images with Tesseract OCR "
+                   "(needs the 'tesseract' binary on PATH; prints an "
+                   "install hint if missing)")
+@click.option("--web", "web_url", default=None,
+              help="Fetch HTTP headers from a URL (GET only - nothing is "
+                   "uploaded; http/https only)")
+@click.option("--map", "export_map", is_flag=True,
+              help="Write an interactive GPS map (standalone HTML file; "
+                   "Leaflet + OpenStreetMap tiles load when you open it)")
 def main(paths, recursive, export_json, export_html, output_dir, no_hashes,
          no_deep, no_social, quiet, device_db, lens, show_strings,
          find_dupes, diff, export_geo, extract_thumb, extract_thumb_dir,
-         scrub, html_index, dump_raw):
+         scrub, html_index, dump_raw, ocr, web_url, export_map):
     """ExifEye - read EXIF, GPS, device info and more from images.
 
     Run without arguments to enter the interactive prompt and choose an
     image or folder to analyze.
     """
     show_banner = True
+    if web_url:
+        _check_web_url(web_url)
+        if not paths:
+            return  # the URL header check was the whole request
     if not paths:
         ConsoleOutput().render_banner()
         target = _prompt_for_target()
@@ -693,6 +916,7 @@ def main(paths, recursive, export_json, export_html, output_dir, no_hashes,
         diff=diff, export_geo=export_geo,
         extract_thumb=extract_thumb, extract_thumb_dir=extract_thumb_dir,
         scrub=scrub, html_index=html_index, dump_raw=dump_raw,
+        export_map=export_map, ocr=ocr,
     ))
 
 

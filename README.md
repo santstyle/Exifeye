@@ -10,11 +10,11 @@
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#requirements)
 [![CLI](https://img.shields.io/badge/interface-CLI-brightgreen.svg)](#usage)
 
-An OSINT command-line tool that mines a single image — or a whole folder — for
-every trace a camera or phone leaves behind: EXIF metadata, embedded GPS
-coordinates, device/camera identification, editing and steganography
-forensics, platform re-encoding fingerprints, and cryptographic hashes for
-cross-referencing.
+An OSINT command-line tool that mines a single file — an image, a document,
+or a video — or a whole folder for every trace a camera, phone, or office
+app leaves behind: EXIF metadata, embedded GPS coordinates, device/camera
+identification, editing and steganography forensics, platform re-encoding
+fingerprints, and cryptographic hashes for cross-referencing.
 
 > **Legal note:** the target image does **not** need to be inside this folder.
 > Point the tool at any path — absolute or relative — from anywhere on disk.
@@ -93,8 +93,35 @@ cross-referencing.
   anywhere — nothing leaves your machine unless you choose to search it.
 - **Deep forensics** — Error Level Analysis (ELA) to spot edited regions,
   basic LSB steganography detection, and image entropy analysis.
-- **Exports** — JSON and standalone HTML reports, with GPS rendered on an
-  embedded map in the HTML version.
+- **Multi-format support** — automatic magic-byte detection: images
+  (JPEG/PNG/GIF/WebP/BMP/TIFF/HEIC/RAW), documents (PDF, DOCX/XLSX/PPTX,
+  legacy DOC/XLS/PPT/MSI via OLE), and video (MP4/MOV container metadata
+  with creation time, dimensions and GPS when present).
+- **Timestamp consistency check** — cross-references EXIF local time,
+  GPS UTC, document and video container clocks: infers the capture
+  timezone, flags zero/epoch placeholders, future dates, impossible field
+  ordering and unexplainable camera-clock skew.
+- **Filename origin forensics** — recognizes screenshot naming (macOS,
+  Windows, Android) and device-default camera/phone filenames (IMG_ iOS/
+  Canon, DSC/DSCN, PXL_ Pixel), so "no GPS on a screenshot" reads as
+  expected rather than stripped metadata.
+- **AI generation & C2PA detection** — scans EXIF/XMP attribution fields
+  and raw bytes for generator names (Midjourney, Stable Diffusion,
+  DALL·E, ...), IPTC digital source types (`trainedAlgorithmicMedia` /
+  `compositelyGenerated`) and C2PA/JUMBF provenance manifests. Honest
+  verdicts: detection, not cryptographic validation.
+- **GPS exports** — `--export-geo` writes KML / GPX / GeoJSON / CSV with
+  every geolocated point plus a capture-path track when 2+ images carry
+  coordinates; `--map` writes a standalone interactive Leaflet map of the
+  whole batch.
+- **OCR & web probes** — `--ocr` extracts printed text from images using
+  a locally installed Tesseract binary (prints an install hint if missing);
+  `--web` fetches HTTP response headers from a URL (GET only — the tool
+  itself never uploads anything).
+- **Exports** — JSON and standalone HTML reports (GPS map embedded), raw
+  EXIF tag dumps (`--dump-raw`), metadata-scrubbed copies (`--scrub`),
+  extracted thumbnails (`--extract-thumb`) and a batch HTML index
+  (`--html-index`).
 - **Hacker-green theme** — Matrix-style output: bright green accents, lime
   warnings, red reserved for risks only.
 - **Batch + recursive scans**, quiet mode, granular feature toggles, and an
@@ -105,12 +132,15 @@ cross-referencing.
 ## Supported Formats
 
 ```
-.jpg  .jpeg  .jfif  .png  .gif  .webp  .bmp  .tif  .tiff
-.heic  .heif  .cr2  .nef  .arw  .raw
+Images:     .jpg  .jpeg  .jfif  .png  .gif  .webp  .bmp  .tif  .tiff
+            .heic  .heif  .cr2  .nef  .arw  .raw
+Documents:  .pdf  .docx  .xlsx  .pptx  .doc  .xls  .ppt  .msi
+Video:      .mp4  .mov
 ```
 
-Unsupported files are skipped with a notice; missing paths are reported
-without aborting the batch.
+The file type is auto-detected from magic bytes — the extension is only a
+hint. Unsupported files are skipped with a notice; missing paths are
+reported without aborting the batch.
 
 ---
 
@@ -122,14 +152,19 @@ without aborting the batch.
 ```
 exifread>=3.0.0
 Pillow>=10.0.0
+pillow-heif>=1.0.0
 rich>=13.0.0
 click>=8.1.0
 imagehash>=4.3.0
 numpy>=1.24.0
 defusedxml>=0.7.1
+pypdf>=4.0.0
+olefile>=0.46
 ```
 
-`defusedxml` enables Pillow's `getxmp()` XMP reading.
+`defusedxml` enables Pillow's `getxmp()` XMP reading; `pillow-heif`
+enables HEIC/HEIF; `pypdf` and `olefile` cover PDF and legacy OLE
+document metadata.
 
 ---
 
@@ -273,13 +308,22 @@ exifeye photo.jpg --device-db ./my_devices.json
 | `--strings` | Scan raw bytes for embedded strings (URLs, emails, phones, IPs, device/software names, GPS hints) |
 | `--find-dupes` | Group exact + near-duplicate images and rank the most original copy (needs 2+ images) |
 | `--diff` | Compare two images field-by-field (EXIF, GPS, device, forensics, hashes) |
+| `--export-geo [kml\|gpx\|geojson\|csv]` | Export geolocated coordinates to one KML / GPX / GeoJSON / CSV file (plus a path track when 2+ points) |
+| `--map` | Write a standalone interactive GPS map (Leaflet + OpenStreetMap tiles load when you open it) |
+| `--ocr` | Extract printed text from images with Tesseract (needs the `tesseract` binary on PATH; prints an install hint if missing) |
+| `--web URL` | Fetch HTTP response headers from a URL (GET only — nothing is uploaded; http/https only) |
+| `--extract-thumb` | Save the embedded EXIF thumbnail to a standalone `.jpg` file |
+| `--extract-thumb-dir DIR` | Directory for extracted thumbnails (default: image folder) |
+| `--scrub` | Write a metadata-stripped copy (`<name>_scrubbed.<ext>`): EXIF/XMP/IPTC/GPS removed, pixels + ICC preserved bit-for-bit |
+| `--html-index` | Write one `index.html` linking all HTML reports (needs 2+ images; auto-enables `--html`) |
+| `--dump-raw` | Dump every raw EXIF tag to `<name>_raw_tags.txt` (full exifread inventory) |
 | `-h, --help` | Show all options |
 
 ---
 
 ## Report Sections
 
-For every image the tool prints:
+For every file the tool prints the sections that apply to its type:
 
 1. **General information** — format, dimensions, color mode, DPI, orientation,
    ICC profile, file size.
@@ -288,20 +332,30 @@ For every image the tool prints:
    coordinates, geohash, Google Maps link.
 4. **Device / Camera** — brand, make, model, device type, OS, enrichment data,
    lens and serial information.
-5. **Deep forensics** — ELA error-level analysis, steganography and entropy
+5. **Timestamp check** — cross-clock consistency (EXIF local vs GPS UTC vs
+   document/video containers), inferred capture timezone, placeholder epochs,
+   future dates and ordering violations.
+6. **Filename origin** — screenshot (macOS / Windows / Android) or
+   device-default naming (IMG_ / DSC / PXL_) detection.
+7. **AI generation / C2PA** — generator attribution, IPTC digital source
+   types and C2PA/JUMBF provenance manifests (detection only, no crypto
+   verification).
+8. **Deep forensics** — ELA error-level analysis, steganography and entropy
    checks.
-6. **Social media** — platform fingerprint from re-encoding, artifacts and
+9. **Social media** — platform fingerprint from re-encoding, artifacts and
    WhatsApp filename patterns (both the `WA####` and the `WhatsApp Image
    ... at ...` patterns).
-7. **Hashes** — MD5, SHA-1, SHA-256 for file matching across datasets.
-8. **Thumbnail recovery** — when the main image is stripped but an
-   embedded thumbnail survives, its GPS / device / timestamps are reported
-   as recovered metadata.
-9. **JPEG structure** — quantization tables, quality estimate, chroma
-   subsampling, comments and marker inventory.
-10. **Meta chunks** — decoded PNG / GIF / WebP text + EXIF chunks.
-11. **Embedded strings** — raw-byte string hits (with `--strings`).
-12. **Batch intelligence / duplicates** — device clustering, timeline,
+10. **Document / video metadata** — PDF, OOXML and OLE document properties;
+    MP4/MOV creation time, dimensions and embedded GPS.
+11. **Hashes** — MD5, SHA-1, SHA-256 for file matching across datasets.
+12. **Thumbnail recovery** — when the main image is stripped but an
+    embedded thumbnail survives, its GPS / device / timestamps are reported
+    as recovered metadata.
+13. **JPEG structure** — quantization tables, quality estimate, chroma
+    subsampling, comments and marker inventory.
+14. **Meta chunks** — decoded PNG / GIF / WebP text + EXIF chunks.
+15. **Embedded strings** — raw-byte string hits (with `--strings`).
+16. **Batch intelligence / duplicates** — device clustering, timeline,
     sessions and near-duplicate groups (3+ images).
 
 A **forensic score (0–10)** summarizes the findings, and when GPS is missing a
@@ -341,11 +395,17 @@ exifeye.py                  entry point, click CLI with options
 pyproject.toml              packaging + global `exifeye` command entry point
 install.bat                 one-command setup (deps + command + PATH)
 start.bat                   Windows launcher (tries `exifeye`, falls back to `py exifeye.py`)
+extractor/sniff.py          magic-byte file type detection (image / document / video)
 extractor/core.py           tag extraction, hashes, timestamps, general info, XMP GPS
 extractor/gps.py            GPS tag decoding, coordinate math, geohash
+extractor/hashes.py         MD5 / SHA-1 / SHA-256
 extractor/lens.py           private Google Lens helper: opens local file only, never uploads
 extractor/device.py         regex classification + enrichment database
 extractor/device_db.json    bundled device enrichment data
+extractor/doc_pdf.py        PDF metadata (pypdf)
+extractor/doc_ooxml.py      OOXML (docx / xlsx / pptx) properties
+extractor/doc_ole.py        legacy OLE (doc / xls / ppt) + MSI SummaryInformation
+extractor/video_mp4.py      MP4 / MOV container metadata (creation time, GPS)
 analyzers/social_media.py   platform re-encoding / WhatsApp filename analysis
 analyzers/deep_forensics.py ELA + steganography checks
 analyzers/thumbnail_meta.py embedded-thumbnail metadata recovery (GPS/device)
@@ -354,9 +414,18 @@ analyzers/chunks.py         PNG / GIF / WebP chunk + text metadata mining
 analyzers/strings.py        raw-byte embedded string extraction
 analyzers/dupes.py          exact + perceptual near-duplicate grouping
 analyzers/batch_intel.py    device clustering, timeline & session analysis
+analyzers/timestamps.py     cross-clock consistency + timezone inference
+analyzers/screenshot.py     screenshot / device-default filename origin
+analyzers/ai_generated.py   AI-generator attribution + C2PA/JUMBF detection
+analyzers/gps_spoof.py      GPS plausibility (Null Island, altitude, hand-edits)
+analyzers/panorama.py       360° / photosphere detection
+analyzers/trailing.py       trailing-data / polyglot detection
+analyzers/auth_risk.py      authentication-risk scoring
 output/console.py           rich console rendering (+ toolbar banner)
 output/json_export.py       JSON report export
 output/html_report.py       standalone HTML report export (map for GPS)
+output/geo_export.py        KML / GPX / GeoJSON / CSV exports + interactive map
+output/raw_dump.py          raw EXIF tag dump
 ```
 
 All exports use sanitized, URI-safe filenames; HTML reports HTML-escape every
@@ -366,6 +435,13 @@ gracefully instead of crashing.
 ---
 
 ## Testing
+
+The repo ships a self-contained pytest suite (analyzer unit tests + CLI
+smoke tests, synthetic fixtures — no external corpus needed):
+
+```bash
+python -m pytest tests/test_all.py
+```
 
 A smoke-test corpus (real camera images with GPS, an EXIF-stripped copy, an
 XMP-only GPS file, a WhatsApp-named file, and corrupt/empty edges) is kept

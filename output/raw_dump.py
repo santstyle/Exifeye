@@ -51,3 +51,60 @@ class RawTagDumper:
 
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return out
+
+    def dump_result(self, result, file_path) -> Path:
+        """Fallback dump for non-images: serialize the ExtractionResult's
+        parsed categories (Document/Video tables, timestamps, GPS, flags)
+        into the same `<stem>_raw_tags.txt` format, since exifread only
+        understands JPEG/TIFF EXIF blocks.
+
+        Returns the written path.
+        """
+        path = Path(file_path)
+        out = path.parent / f"{path.stem}_raw_tags.txt"
+
+        lines = [
+            f"# ExifEye raw tag dump - {path.name}",
+            "# non-image container: parsed metadata categories below",
+            "",
+        ]
+        for category, tags in (result.exif_data or {}).items():
+            lines.append(f"[{category}]")
+            if isinstance(tags, dict):
+                for key in sorted(tags.keys()):
+                    try:
+                        lines.append(f"{key} = {tags[key]}")
+                    except Exception:
+                        lines.append(f"{key} = <unreadable>")
+            else:
+                lines.append(str(tags))
+            lines.append("")
+
+        if result.timestamps:
+            lines.append("[Timestamps]")
+            for key, value in result.timestamps.items():
+                lines.append(f"{key} = {value}")
+            lines.append("")
+
+        gps = result.gps or {}
+        if gps.get("available"):
+            lines.append("[GPS]")
+            for key in ("latitude", "longitude", "altitude", "geohash",
+                        "google_maps_link", "source"):
+                if gps.get(key) is not None:
+                    lines.append(f"{key} = {gps[key]}")
+            lines.append("")
+
+        if result.flags:
+            lines.append("[Flags]")
+            for key, value in result.flags.items():
+                lines.append(f"{key} = {value}")
+            lines.append("")
+
+        if result.errors:
+            lines.append("[Errors]")
+            lines.extend(f"- {e}" for e in result.errors)
+            lines.append("")
+
+        out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return out

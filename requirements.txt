@@ -1,8 +1,11 @@
 exifread>=3.0.0
 Pillow>=10.0.0
+pillow-heif>=1.0.0
 rich>=13.0.0
 rich-pixels>=3.0.0
 click>=8.1.0
 imagehash>=4.3.0
 numpy>=1.24.0
 defusedxml>=0.7.1
+pypdf>=4.0.0
+olefile>=0.46

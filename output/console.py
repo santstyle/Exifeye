@@ -19,6 +19,15 @@ from rich.table import Table
 from rich.text import Text
 from rich import box
 
+# Parser flag keys that indicate active/risky content in non-image files;
+# the verdict panel shows these for documents/video instead of the
+# image-authenticity score (which would be meaningless there).
+_RISKY_FLAGS = (
+    "macros", "encrypted_ooxml", "javascript", "javascript_raw",
+    "external_rels", "path_leak", "suspicious_streams",
+    "suspicious_parts", "ole_objects", "embedded_files",
+)
+
 
 class ConsoleOutput:
     """Render extraction results in a rich console format.
@@ -142,7 +151,9 @@ class ConsoleOutput:
         """
         all_sections = {"gps", "device", "social", "forensics", "exif",
                         "thumbnail", "jpeg_structure", "chunks", "strings",
-                        "auth_risk", "gps_spoof", "trailing", "panorama"}
+                        "auth_risk", "gps_spoof", "timestamp_check",
+                        "filename_origin", "ai_generated", "trailing",
+                        "panorama"}
         s = sections if sections is not None else all_sections
         extra = extra or {}
 
@@ -152,6 +163,12 @@ class ConsoleOutput:
         if "device" in s:
             self._render_device(result)
         self._render_timestamps(result)
+        if "timestamp_check" in s and extra.get("timestamp_check"):
+            self._render_timestamp_check(extra["timestamp_check"])
+        if "filename_origin" in s and extra.get("filename_origin"):
+            self._render_filename_origin(extra["filename_origin"])
+        if "ai_generated" in s and extra.get("ai_generated"):
+            self._render_ai_generated(extra["ai_generated"])
 
         # v2.0 analyzer sections
         if "thumbnail" in s and extra.get("thumbnail"):
@@ -182,9 +199,11 @@ class ConsoleOutput:
             self._render_auth_risk(extra["auth_risk"])
         self._render_verdict(result, forensics, deep, extra)
 
-        if not result.gps.get("available"):
+        if (not result.gps.get("available")
+                and getattr(result, "kind", "image") in ("image", "unknown")):
             # GPS missing -> point the user to find the ORIGINAL copy that
             # still holds the coordinates. Skip when GPS was already found.
+            # Reverse-image-search advice only makes sense for images.
             stripped = self._gps_ifd_stripped(result)
             zero_placeholder = result.gps.get("zero_placeholder")
             self.console.print(Rule(" LOCATE THE ORIGINAL "))
@@ -214,7 +233,10 @@ class ConsoleOutput:
 
     def _render_file_info(self, result: Any) -> None:
         """Render basic file information as a header card."""
-        dims = f"{result.dimensions[0]:,} x {result.dimensions[1]:,} px" if result.dimensions[0] else "Unknown"
+        is_image = getattr(result, "kind", "image") in ("image", "unknown")
+        unit = " px" if is_image else ""
+        dims = (f"{result.dimensions[0]:,} x {result.dimensions[1]:,}{unit}"
+                if result.dimensions[0] else "Unknown")
 
         info = Table.grid(padding=(0, 2))
         info.add_column(style=self.LABEL, justify="right")
@@ -222,15 +244,17 @@ class ConsoleOutput:
         info.add_row("Format", f"[bold]{result.file_type.upper()}[/bold] ({result.mime_type})")
         info.add_row("File Size", f"{result.file_size:,} bytes  [dim]({result.file_size / 1024:.1f} KB)[/dim]")
         info.add_row("Dimensions", dims)
-        info.add_row("Color Mode", result.mode or "[dim]Unknown[/dim]")
-        info.add_row("DPI", f"{result.dpi[0]} x {result.dpi[1]}" if result.dpi else "[dim]not specified[/dim]")
-        info.add_row("Orientation", result.orientation or "[dim]not specified[/dim]")
-        info.add_row("ICC Profile", result.icc_profile or "[dim]none[/dim]")
+        if is_image:
+            # Pixel-pipeline fields - meaningless for documents/video.
+            info.add_row("Color Mode", result.mode or "[dim]Unknown[/dim]")
+            info.add_row("DPI", f"{result.dpi[0]} x {result.dpi[1]}" if result.dpi else "[dim]not specified[/dim]")
+            info.add_row("Orientation", result.orientation or "[dim]not specified[/dim]")
+            info.add_row("ICC Profile", result.icc_profile or "[dim]none[/dim]")
 
         header = Panel(
             info,
-            title=f"[bold {self.ACCENT}][ {result.file_name} ][/bold {self.ACCENT}]",
-            subtitle=f"[dim]{result.file_path}[/dim]",
+            title=f"[bold {self.ACCENT}][ {escape(result.file_name)} ][/bold {self.ACCENT}]",
+            subtitle=f"[dim]{escape(result.file_path)}[/dim]",
             border_style=self.ACCENT,
             padding=(1, 2),
         )
@@ -715,6 +739,69 @@ class ConsoleOutput:
             padding=(1, 2),
         ))
 
+    def _render_timestamp_check(self, check: Dict[str, Any]) -> None:
+        """Render timestamp consistency (compact when clean)."""
+        if not check.get("available"):
+            return  # no timestamps at all - nothing worth showing
+
+        issues = check.get("issues") or []
+        verdict = str(check.get("verdict", ""))
+        if not issues:
+            line = (f"[{self.GOOD}]TIMESTAMP CHECK: consistent"
+                    f"[/{self.GOOD}]")
+            tz = check.get("inferred_tz")
+            if tz:
+                line += (f" [- capture timezone {escape(str(tz))} "
+                         f"(inferred from GPS UTC)]")
+            self.console.print(line)
+            return
+
+        lines = [f"  [dim]-[/dim] {escape(str(issue))}" for issue in issues]
+        self.console.print(Panel(
+            "\n".join(lines) + f"\n\n[{self.BAD}]{escape(verdict)}[/{self.BAD}]",
+            title=f"[bold {self.BAD}]TIMESTAMP CHECK: {len(issues)} ISSUE(S)"
+                  f"[/bold {self.BAD}]",
+            border_style=self.BAD,
+            padding=(1, 2),
+        ))
+
+    def _render_ai_generated(self, info: Dict[str, Any]) -> None:
+        """Render AI-generation / C2PA findings (silent when clean)."""
+        if not info.get("available"):
+            return
+        if info.get("detected"):
+            conf = str(info.get("confidence") or "medium").upper()
+            lines = [f"  [dim]-[/dim] {escape(str(sig))}"
+                     for sig in info.get("signals") or []]
+            verdict = str(info.get("verdict", ""))
+            # Finding, not a security risk - red stays reserved for risks.
+            color = self.WARN
+            self.console.print(Panel(
+                "\n".join(lines) + f"\n\n[{color}]{escape(verdict)}[/{color}]",
+                title=f"[bold {color}]AI GENERATION MARKERS ({conf})"
+                      f"[/bold {color}]",
+                border_style=color,
+                padding=(1, 2),
+            ))
+            return
+        if info.get("c2pa"):
+            verdict = str(info.get("verdict", ""))
+            self.console.print(
+                f"[{self.LABEL}]C2PA PROVENANCE[/{self.LABEL}] - "
+                f"[{self.MUTED}]{escape(verdict)}[/{self.MUTED}]"
+            )
+
+    def _render_filename_origin(self, origin: Dict[str, Any]) -> None:
+        """Render filename origin (screenshot / default naming) hint."""
+        if not origin.get("detected"):
+            return  # ordinary name - no hint worth printing
+        label = str(origin.get("label", ""))
+        verdict = str(origin.get("verdict", ""))
+        self.console.print(
+            f"[{self.GOOD}]FILENAME ORIGIN: {escape(label)}[/{self.GOOD}]"
+            f" - {escape(verdict)}"
+        )
+
     def _render_trailing(self, trailing: Dict[str, Any]) -> None:
         """Render trailing-data / polyglot detection (only when bytes exist)."""
         if not trailing.get("available"):
@@ -796,6 +883,8 @@ class ConsoleOutput:
         thumb_device = (thumb.get("device") or {})
         thumb_device_ok = bool(thumb_device.get("make") or thumb_device.get("model"))
 
+        is_image = getattr(result, "kind", "image") in ("image", "unknown")
+
         gps_ok = result.gps.get("available", False)
         device_ok = bool(result.device.get("make") or result.device.get("model"))
         platform = (forensics or {}).get("detected_platform")
@@ -807,7 +896,9 @@ class ConsoleOutput:
             lines.append(f"  [bold {self.GOOD}]GEOLOCATED[/bold {self.GOOD}]  {lat:.5f}, {lon:.5f}  "
                          f"-> [link={result.gps.get('google_maps_link', '')} underline]open in Google Maps[/link]")
         else:
-            if result.gps.get("zero_placeholder"):
+            if not is_image:
+                gps_note = "no location metadata in this file"
+            elif result.gps.get("zero_placeholder"):
                 gps_note = ("GPS IFD present but coordinates are (0,0) - "
                             "placeholder (location disabled or GPS not locked when taken)")
             else:
@@ -829,13 +920,18 @@ class ConsoleOutput:
             tail = (f" [bold {self.WARN}]BUT embedded thumbnail says "
                     f"{thumb_device.get('make') or '?'} {thumb_device.get('model') or '?'}"
                     f"[/bold {self.WARN}]" if thumb_device_ok else "")
-            lines.append(f"  [bold {self.BAD}]ANONYMOUS DEVICE[/bold {self.BAD}]  EXIF stripped - "
-                         f"device unknown{tail}")
+            if is_image:
+                lines.append(f"  [bold {self.BAD}]ANONYMOUS DEVICE[/bold {self.BAD}]  EXIF stripped - "
+                             f"device unknown{tail}")
+            else:
+                lines.append(f"  [bold {self.BAD}]NO DEVICE METADATA[/bold {self.BAD}]  "
+                             f"no author/device information found")
 
-        if platform:
-            lines.append(f"  [bold {self.WARN}]PLATFORM TRACE[/bold {self.WARN}]  image shows {platform} transit signatures")
-        else:
-            lines.append(f"  [bold {self.GOOD}]NO PLATFORM TRACE[/bold {self.GOOD}]  no social media re-encoding detected")
+        if is_image:
+            if platform:
+                lines.append(f"  [bold {self.WARN}]PLATFORM TRACE[/bold {self.WARN}]  image shows {platform} transit signatures")
+            else:
+                lines.append(f"  [bold {self.GOOD}]NO PLATFORM TRACE[/bold {self.GOOD}]  no social media re-encoding detected")
 
         if result.has_embedded_thumbnail:
             if thumb_gps_ok:
@@ -852,33 +948,47 @@ class ConsoleOutput:
         if deep and deep.get("ela", {}).get("available") and self._ela_implies_editing(deep["ela"]):
             lines.append(f"  [bold {self.BAD}]EDITING DETECTED[/bold {self.BAD}]  ELA suggests manipulation - treat with caution")
 
-        # Overall score: simple 0-10 heuristic
-        score = 0
-        if gps_ok:
-            score += 4
-        elif thumb_gps_ok:
-            score += 2  # partial win: coords survived in the thumbnail
-        if device_ok:
-            score += 3
-        elif thumb_device_ok:
-            score += 1
-        if not platform:
-            score += 1
-        elif forensics and forensics.get("reencoded"):
-            score += 1
-        if result.timestamps:
-            score += 1
-        if result.has_embedded_thumbnail:
-            score += 1
+        if is_image:
+            # Overall score: simple 0-10 heuristic (image authenticity)
+            score = 0
+            if gps_ok:
+                score += 4
+            elif thumb_gps_ok:
+                score += 2  # partial win: coords survived in the thumbnail
+            if device_ok:
+                score += 3
+            elif thumb_device_ok:
+                score += 1
+            if not platform:
+                score += 1
+            elif forensics and forensics.get("reencoded"):
+                score += 1
+            if result.timestamps:
+                score += 1
+            if result.has_embedded_thumbnail:
+                score += 1
 
-        score_line = Text()
-        score_line.append(f"  FORENSIC SCORE: {score}/10  ", style="bold")
-        score_bar = "█" * score + "░" * (10 - score)
-        score_color = self.GOOD if score >= 7 else (self.WARN if score >= 4 else self.BAD)
-        score_line.append(score_bar, style=score_color)
+            score_line = Text()
+            score_line.append(f"  FORENSIC SCORE: {score}/10  ", style="bold")
+            score_bar = "█" * score + "░" * (10 - score)
+            score_color = self.GOOD if score >= 7 else (self.WARN if score >= 4 else self.BAD)
+            score_line.append(score_bar, style=score_color)
+            body = "\n" + "\n".join(lines) + "\n\n" + str(score_line) + "\n"
+        else:
+            # Non-image containers: surface parser risk flags instead of the
+            # image-authenticity score (meaningless for PDF/MP4/DOCX/...).
+            notable = sorted(k for k in _RISKY_FLAGS
+                             if (result.flags or {}).get(k))
+            if notable:
+                lines.append(f"  [bold {self.WARN}]NOTABLE[/bold {self.WARN}]  "
+                             + ", ".join(notable))
+            else:
+                lines.append(f"  [bold {self.GOOD}]NO RISK FLAGS[/bold {self.GOOD}]  "
+                             "no macros/JS/encryption detected")
+            body = "\n" + "\n".join(lines) + "\n"
 
         self.console.print(Panel(
-            "\n" + "\n".join(lines) + "\n\n" + str(score_line) + "\n",
+            body,
             title=f"[bold {self.ACCENT}]VERDICT[/bold {self.ACCENT}]",
             border_style=self.ACCENT,
             padding=(0, 1),

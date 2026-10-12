@@ -223,6 +223,71 @@ class HTMLReport:
         else:
             spoof_html = ""
 
+        # Timestamp consistency check (v2.2)
+        tsc = (extra or {}).get("timestamp_check") or {}
+        if tsc.get("available") and tsc.get("issues"):
+            issue_rows = "".join(
+                f"<tr><td>{html.escape(str(issue))}</td></tr>"
+                for issue in tsc.get("issues") or []
+            )
+            tsc_html = f"""
+            <div class="card missing">
+                <h2>Timestamp Check <span class="badge none">ISSUES</span></h2>
+                <p><strong>Verdict:</strong> {html.escape(str(tsc.get('verdict', '')))}</p>
+                <table>{issue_rows}</table>
+            </div>
+            """
+        elif tsc.get("available"):
+            tz = tsc.get("inferred_tz")
+            tz_note = (
+                f" — capture timezone {html.escape(str(tz))} "
+                f"(inferred from GPS UTC)" if tz else ""
+            )
+            tsc_html = f"""
+            <div class="card gps-card">
+                <h2>Timestamp Check <span class="badge detected">CLEAN</span></h2>
+                <p>{html.escape(str(tsc.get('verdict', '')))}{tz_note}</p>
+            </div>
+            """
+        else:
+            tsc_html = ""
+
+        # Filename origin (v2.2): screenshot / device-default naming hint
+        fno = (extra or {}).get("filename_origin") or {}
+        if fno.get("detected"):
+            fno_html = f"""
+            <div class="card gps-card">
+                <h2>Filename Origin <span class="badge detected">{html.escape(str(fno.get('label', '')))}</span></h2>
+                <p>{html.escape(str(fno.get('verdict', '')))}</p>
+            </div>
+            """
+        else:
+            fno_html = ""
+
+        # AI generation / C2PA provenance (v2.2)
+        ai = (extra or {}).get("ai_generated") or {}
+        if ai.get("detected"):
+            ai_sig_rows = "".join(
+                f"<tr><td>{html.escape(str(sg))}</td></tr>"
+                for sg in ai.get("signals") or []
+            )
+            ai_html = f"""
+            <div class="card missing">
+                <h2>AI Generation <span class="badge none">{html.escape(str(ai.get('confidence') or 'medium')).upper()}</span></h2>
+                <p><strong>Verdict:</strong> {html.escape(str(ai.get('verdict', '')))}</p>
+                <table>{ai_sig_rows}</table>
+            </div>
+            """
+        elif ai.get("c2pa"):
+            ai_html = f"""
+            <div class="card gps-card">
+                <h2>C2PA Provenance <span class="badge detected">PRESENT</span></h2>
+                <p>{html.escape(str(ai.get('verdict', '')))}</p>
+            </div>
+            """
+        else:
+            ai_html = ""
+
         # Trailing data / polyglot check (v2.1)
         trailing = (extra or {}).get("trailing") or {}
         if trailing.get("trailing_bytes", 0) > 0:
@@ -356,6 +421,9 @@ class HTMLReport:
     {spoof_html}
     {device_html}
     {ts_html}
+    {tsc_html}
+    {fno_html}
+    {ai_html}
     {forensics_html}
     {exif_html}
     {deep_html}
