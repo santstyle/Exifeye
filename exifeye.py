@@ -5,7 +5,7 @@ Usage:
     python exifeye.py image.jpg
     python exifeye.py folder/ --recursive
     python exifeye.py image.jpg --json --html
-    python exifeye.py image.jpg --lens     # reverse-image search (Lens/Yandex/...)
+    python exifeye.py image.jpg --lens     # private Google Lens search (local, no upload)
     python exifeye.py -h             # show all options
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ if sys.platform == "win32":
 
 from extractor.core import MetadataExtractor
 from extractor.hashes import HashCalculator
-from extractor.lens import open_reverse_search, upload_image
+from extractor.lens import open_for_lens
 from analyzers.social_media import SocialMediaForensics
 from analyzers.deep_forensics import DeepForensics
 from output.console import ConsoleOutput
@@ -206,7 +206,7 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
                 progress.update(task, advance=1)
 
     if lens:
-        _run_reverse_search(images[0])
+        _run_lens_search(images[0])
 
     console.print(
         f"\n[bold {GREEN}]Done: {len(images) - failed}/{len(images)} analyzed"
@@ -215,28 +215,23 @@ def _run_analysis(paths: list[str], recursive: bool, export_json: bool,
     return 1 if failed else 0
 
 
-def _run_reverse_search(image_path: Path) -> None:
-    """Upload a single image and open Google Lens / Yandex / Bing / TinEye.
+def _run_lens_search(image_path: Path) -> None:
+    """Open the local image for a Google Lens search - private by default.
 
-    The classic OSINT bypass for a picture with missing GPS: an online copy
-    of the same image often kept its coordinates.
+    ExifEye does NOT upload the image anywhere. It opens the local file in
+    the browser; the user right-clicks it and picks "Search image with
+    Google" (Chrome/Edge), which sends the picture to Google Lens exactly
+    once, through the user's own browser, with the image pre-selected.
     """
-    console.print(f"\n[{LIME}]Reverse image search: uploading {image_path.name} ...[/{LIME}]")
-    try:
-        hosted = upload_image(image_path)
-    except Exception as e:
-        console.print(f"[red]Reverse image search failed: {e}[/red]")
-        return
-    console.print(f"[{MINT}]Uploaded to public host:[/{MINT}] {hosted}")
-    opened = open_reverse_search(hosted)
-    if opened:
-        console.print(f"[{MINT}]Opened in browser:[/{MINT}] {', '.join(opened)}")
+    if open_for_lens(image_path):
+        console.print(f"\n[{MINT}]Opened in browser (local copy, nothing uploaded):[/{MINT}] {image_path}")
+        console.print(f"[{LIME}]Right-click the image -> 'Search image with Google'[/{LIME}]")
+        console.print(
+            f"[{LIME}]Google Lens opens with this image pre-selected - the image only "
+            f"leaves your machine when YOU search it.[/{LIME}]"
+        )
     else:
         console.print("[red]Could not open the browser.[/red]")
-    console.print(
-        f"[{LIME}]Tip: run search hits through ExifEye - a copy that still has "
-        f"GPS is the fastest way to a location.[/{LIME}]"
-    )
 
 
 @click.command(name="exifeye", context_settings={"help_option_names": ["-h", "--help"]})
@@ -252,8 +247,8 @@ def _run_reverse_search(image_path: Path) -> None:
 @click.option("--device-db", type=click.Path(exists=True), default=None,
               help="Path to custom device enrichment JSON database")
 @click.option("--lens", is_flag=True,
-              help="Reverse-image search the image via Google Lens / Yandex / Bing / TinEye "
-                   "(uploads it to a public host first)")
+              help="Open the local image for Google Lens search (no upload - "
+                   "right-click the image in the browser to search)")
 def main(paths, recursive, export_json, export_html, output_dir, no_hashes,
          no_deep, no_social, quiet, device_db, lens):
     """ExifEye - read EXIF, GPS, device info and more from images.

@@ -62,10 +62,11 @@ cross-referencing.
 - **WhatsApp filename detection** — WhatsApp media files follow the
   `IMG-YYYYMMDD-WA####.jpg` pattern; the received date is extracted
   automatically (`IMG-20230415-WA0001.jpg` -> `2023-04-15`).
-- **One-command reverse image search** — `--lens` uploads the image to an
-  anonymous public host and opens Google Lens, Yandex, Bing and TinEye in
-  your browser. The classic OSINT bypass when a picture's GPS is missing:
-  an online copy of the same image often kept its coordinates.
+- **Private reverse image search** — `--lens` opens the image locally in
+  your browser with a Google Lens tab ready: one right-click →
+  "Search image with Google" sends it to Lens with the image pre-selected,
+  through your own browser. The tool itself **never uploads** the picture
+  anywhere — nothing leaves your machine unless you choose to search it.
 - **Deep forensics** — Error Level Analysis (ELA) to spot edited regions,
   basic LSB steganography detection, and image entropy analysis.
 - **Exports** — JSON and standalone HTML reports, with GPS rendered on an
@@ -197,8 +198,9 @@ Quiet mode — only the one-line summary per image:
 exifeye ./photos --recursive --quiet
 ```
 
-Reverse-image search — uploads one photo and opens Google Lens / Yandex /
-Bing / TinEye in the browser (handy when the image's GPS is missing):
+Reverse-image search — private, local-first: opens the image in your
+browser with a Google Lens tab ready; right-click the image → "Search
+image with Google". The tool uploads nothing:
 
 ```bash
 exifeye photo.jpg --lens
@@ -225,7 +227,7 @@ exifeye photo.jpg --device-db ./my_devices.json
 | `--no-social` | Skip social media forensics |
 | `-q, --quiet` | Print only the one-line summary, not the full report |
 | `--device-db FILE` | Path to a custom device enrichment JSON database |
-| `--lens` | Reverse-image search one image: upload it and open Google Lens / Yandex / Bing / TinEye in the browser |
+| `--lens` | Private Google Lens search: open the local image in the browser for a right-click → "Search image with Google" (no upload by the tool) |
 | `-h, --help` | Show all options |
 
 ---
@@ -286,7 +288,7 @@ install.bat                 one-command setup (deps + command + PATH)
 start.bat                   Windows launcher (tries `exifeye`, falls back to `py exifeye.py`)
 extractor/core.py           tag extraction, hashes, timestamps, general info, XMP GPS
 extractor/gps.py            GPS tag decoding, coordinate math, geohash
-extractor/lens.py           reverse-image search: anonymous upload + Lens/Yandex/Bing/TinEye
+extractor/lens.py           private Google Lens helper: opens local file only, never uploads
 extractor/device.py         regex classification + enrichment database
 extractor/device_db.json    bundled device enrichment data
 analyzers/social_media.py   platform re-encoding / WhatsApp filename analysis
