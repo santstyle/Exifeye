@@ -68,6 +68,13 @@ class SocialMediaForensics:
         self._whatsapp_file_re = re.compile(
             r"^(?:IMG|VID|PTT)[-_](\d{8})[-_]?WA\d{3,4}", re.IGNORECASE
         )
+        # Modern WhatsApp desktop downloader: "WhatsApp Image 2026-10-11 at 21.03.19.jpeg"
+        # carries the FULL receive date AND time (the old WA#### suffix is gone).
+        self._whatsapp_download_re = re.compile(
+            r"^WhatsApp (?:Image|Video|Audio|Document|Sticker|Profile Photo) "
+            r"(\d{4})-(\d{2})-(\d{2}) at (\d{2})\.(\d{2})\.(\d{2})",
+            re.IGNORECASE,
+        )
         # React Native image-picker temp cache: rn_image_picker_lib_temp_<uuid>.jpg
         # Discord Mobile is a React Native app (as are Instagram/Facebook clients),
         # so picked images get this exact temp name on the device before upload.
@@ -107,6 +114,26 @@ class SocialMediaForensics:
             if not result["detected_platform"]:
                 result["detected_platform"] = "whatsapp"
                 result["confidence"] = 0.9
+
+        # 0b. Modern WhatsApp download filename - carries receive date AND time
+        # even when every byte of EXIF is gone (desktop downloader pattern).
+        wa_dl = self._whatsapp_download_re.match(path.name)
+        if wa_dl:
+            y, mo, d, h, mi, s = wa_dl.groups()
+            date_str = f"{y}-{mo}-{d}"
+            time_str = f"{h}:{mi}:{s}"
+            result["whatsapp_filename_date"] = date_str
+            result["whatsapp_filename_time"] = time_str
+            result["whatsapp_filename_datetime"] = f"{date_str} {time_str}"
+            result["detection_methods"].append(
+                "WhatsApp download filename (receive date + time)"
+            )
+            result["residual_traces"].append(
+                f"WhatsApp download; received {date_str} {time_str}"
+            )
+            if not result["detected_platform"]:
+                result["detected_platform"] = "whatsapp"
+                result["confidence"] = max(result["confidence"], 0.9)
 
         # 1. Binary signature detection
         sig_result = self._scan_binary_signatures(path)

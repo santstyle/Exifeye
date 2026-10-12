@@ -22,6 +22,7 @@ dependencies = [
     "exifread>=3.0.0",
     "Pillow>=10.0.0",
     "rich>=13.0.0",
+    "rich-pixels>=3.0.0",
     "click>=8.1.0",
     "imagehash>=4.3.0",
     "numpy>=1.24.0",
@@ -37,3 +38,4 @@ packages = ["extractor", "output", "analyzers"]
 
 [tool.setuptools.package-data]
 extractor = ["device_db.json"]
+output = ["banner.png"]

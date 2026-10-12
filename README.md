@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="thumbnail.png" alt="ExifEye - Neon Forensic Intelligence">
+  <img src="output/banner.png" alt="ExifEye Neon Vision - Forensic Intelligence">
 </p>
 
 # ExifEye
@@ -61,7 +61,31 @@ cross-referencing.
   artifacts to suggest which platform an image may have traveled through.
 - **WhatsApp filename detection** — WhatsApp media files follow the
   `IMG-YYYYMMDD-WA####.jpg` pattern; the received date is extracted
-  automatically (`IMG-20230415-WA0001.jpg` -> `2023-04-15`).
+  automatically (`IMG-20230415-WA0001.jpg` -> `2023-04-15`). The modern
+  desktop downloader pattern is recognized too: `WhatsApp Image
+  2026-10-11 at 21.03.19.jpeg` reveals the exact receive date + time.
+- **Thumbnail metadata mining** — cameras embed a small JPEG preview
+  inside the EXIF block; even when the main image is stripped, that
+  thumbnail can still carry GPS, device, timestamp and software traces
+  (reported as recovered metadata).
+- **JPEG structure analysis** — marker inventory (APPn / DQT / DHT /
+  SOF / COM), estimated rendering quality, chroma subsampling
+  (4:2:0 / 4:2:2 / 4:4:4), progressive flag and comments — a strong
+  fingerprint for re-encoded platform images.
+- **Container chunk mining** — PNG `tEXt` / `iTXt` / `zTXt` / `eXIf`,
+  GIF comment + application extensions, and WebP `EXIF` / `XMP` chunks
+  are decoded; an `eXIf` / `EXIF` chunk is parsed like a camera file, so
+  GPS can be recovered from formats that normally show nothing.
+- **Embedded strings miner** — `--strings` scans the raw bytes for URLs,
+  emails, phone numbers, IPs, device/software names and GPS hints that
+  survive full metadata stripping (also catches Windows UTF-16 strings).
+- **Near-duplicate hunter** — `--find-dupes` groups byte-identical and
+  perceptually similar images (phash) and ranks which copy is the most
+  original (GPS / resolution / timestamps / embedded thumbnail).
+- **Batch intelligence** — analyzing a folder clusters images by device
+  serial, builds a capture timeline, splits photo sessions by gaps, and
+  surfaces insights (same physical camera across files, timeline spans,
+  largest gap, fully-stripped batch warnings).
 - **Private reverse image search** — `--lens` opens the image locally in
   your browser with a Google Lens tab ready: one right-click →
   "Search image with Google" sends it to Lens with the image pre-selected,
@@ -206,6 +230,24 @@ image with Google". The tool uploads nothing:
 exifeye photo.jpg --lens
 ```
 
+Mine residual traces + raw strings from a platform-stripped image:
+
+```bash
+exifeye "WhatsApp Image 2026-10-11 at 21.03.19.jpeg" --strings
+```
+
+Find the most original copy among look-alikes:
+
+```bash
+exifeye ./photos --recursive --find-dupes
+```
+
+Compare two versions field-by-field:
+
+```bash
+exifeye original.jpg reencoded.jpg --diff
+```
+
 Use a custom device database:
 
 ```bash
@@ -228,6 +270,9 @@ exifeye photo.jpg --device-db ./my_devices.json
 | `-q, --quiet` | Print only the one-line summary, not the full report |
 | `--device-db FILE` | Path to a custom device enrichment JSON database |
 | `--lens` | Private Google Lens search: open the local image in the browser for a right-click → "Search image with Google" (no upload by the tool) |
+| `--strings` | Scan raw bytes for embedded strings (URLs, emails, phones, IPs, device/software names, GPS hints) |
+| `--find-dupes` | Group exact + near-duplicate images and rank the most original copy (needs 2+ images) |
+| `--diff` | Compare two images field-by-field (EXIF, GPS, device, forensics, hashes) |
 | `-h, --help` | Show all options |
 
 ---
@@ -246,8 +291,18 @@ For every image the tool prints:
 5. **Deep forensics** — ELA error-level analysis, steganography and entropy
    checks.
 6. **Social media** — platform fingerprint from re-encoding, artifacts and
-   WhatsApp filename patterns.
+   WhatsApp filename patterns (both the `WA####` and the `WhatsApp Image
+   ... at ...` patterns).
 7. **Hashes** — MD5, SHA-1, SHA-256 for file matching across datasets.
+8. **Thumbnail recovery** — when the main image is stripped but an
+   embedded thumbnail survives, its GPS / device / timestamps are reported
+   as recovered metadata.
+9. **JPEG structure** — quantization tables, quality estimate, chroma
+   subsampling, comments and marker inventory.
+10. **Meta chunks** — decoded PNG / GIF / WebP text + EXIF chunks.
+11. **Embedded strings** — raw-byte string hits (with `--strings`).
+12. **Batch intelligence / duplicates** — device clustering, timeline,
+    sessions and near-duplicate groups (3+ images).
 
 A **forensic score (0–10)** summarizes the findings, and when GPS is missing a
 **reverse image search** footer (Google Lens / Yandex / TinEye / Bing Visual)
@@ -293,6 +348,12 @@ extractor/device.py         regex classification + enrichment database
 extractor/device_db.json    bundled device enrichment data
 analyzers/social_media.py   platform re-encoding / WhatsApp filename analysis
 analyzers/deep_forensics.py ELA + steganography checks
+analyzers/thumbnail_meta.py embedded-thumbnail metadata recovery (GPS/device)
+analyzers/jpeg_structure.py JPEG marker / quality / subsampling structure analysis
+analyzers/chunks.py         PNG / GIF / WebP chunk + text metadata mining
+analyzers/strings.py        raw-byte embedded string extraction
+analyzers/dupes.py          exact + perceptual near-duplicate grouping
+analyzers/batch_intel.py    device clustering, timeline & session analysis
 output/console.py           rich console rendering (+ toolbar banner)
 output/json_export.py       JSON report export
 output/html_report.py       standalone HTML report export (map for GPS)
