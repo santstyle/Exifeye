@@ -80,6 +80,17 @@ class ConsoleOutput:
                            style=f"bold {self.ACCENT}")
         self.console.print("")
 
+    # The standard VGA / console 16-color palette. When the terminal can
+    # only show 16 colors, the image is snapped to these exact RGB values
+    # before rich-pixels sees it, so rich's own RGB->16 downgrade is a
+    # lossless no-op and the logo keeps its shape instead of smearing.
+    _ANSI16 = (
+        (0, 0, 0), (170, 0, 0), (0, 170, 0), (170, 85, 0),
+        (0, 0, 170), (170, 0, 170), (0, 170, 170), (170, 170, 170),
+        (85, 85, 85), (255, 85, 85), (85, 255, 85), (255, 255, 85),
+        (85, 85, 255), (255, 85, 255), (85, 255, 255), (255, 255, 255),
+    )
+
     def _render_image_banner(self) -> bool:
         """Try to render the neon logo PNG in the terminal via rich-pixels.
 
@@ -92,6 +103,11 @@ class ConsoleOutput:
         handed over already at final size (resize=None) so it is not
         resampled again.
 
+        On 16-color terminals (legacy Windows consoles, color_system
+        "windows" / "standard") the image is additionally snapped to the
+        ANSI 16-color palette before hand-off — otherwise rich's own
+        RGB->16 downgrade smears the neon strokes into a solid slab.
+
         Returns True when the image banner was printed; False otherwise so
         the caller falls back to the ASCII text banner. Never raises - pixel
         art is decorative and the text art is the guaranteed baseline.
@@ -99,6 +115,9 @@ class ConsoleOutput:
         try:
             banner = Path(__file__).resolve().parent / "banner.png"
             if not banner.is_file() or not self.console.is_terminal:
+                return False
+            if self.console.color_system is None:
+                # No color at all — pixel art would be an unreadable slab.
                 return False
             from PIL import Image
             from rich_pixels import Pixels
@@ -131,14 +150,32 @@ class ConsoleOutput:
                     height += 1
                 # LANCZOS here; resize=None below so rich-pixels does not
                 # re-resample this with its default NEAREST.
-                pixels = Pixels.from_image(
-                    img.resize((width, height), Image.LANCZOS)
-                )
+                img = img.resize((width, height), Image.LANCZOS)
+                # 16-color terminals: snap to the ANSI palette so the
+                # logo shape survives rich's RGB->16 downgrade.
+                if self.console.legacy_windows or self.console.color_system in (
+                    "windows", "standard",
+                ):
+                    img = self._quantize_ansi16(img)
+                pixels = Pixels.from_image(img)
             self.console.print(pixels)
             self.console.print("")
             return True
         except Exception:
             return False
+
+    def _quantize_ansi16(self, img):
+        """Snap an RGB image to the 16 ANSI console colors (lossless
+        downgrade on 16-color terminals)."""
+        from PIL import Image
+
+        palette = Image.new("P", (1, 1))
+        flat = []
+        for r, g, b in self._ANSI16:
+            flat.extend((r, g, b))
+        flat.extend((0, 0, 0) * (256 - 16))
+        palette.putpalette(flat)
+        return img.quantize(palette=palette, dither=Image.Dither.NONE).convert("RGB")
 
     def render(self, result: Any, forensics: Dict[str, Any] | None = None,
                deep: Dict[str, Any] | None = None,
